@@ -3099,23 +3099,26 @@ pub async fn commit_changes(
 
     let mut index = swl!(repo.index())?;
     if index.has_conflicts() {
-        let is_in_merge_state = repo.state() == RepositoryState::Merge
-            || repo.state() == RepositoryState::Rebase
-            || repo.state() == RepositoryState::RebaseMerge;
+        let repo_state = repo.state();
+        let can_cleanup_stale_conflicts = repo_state == RepositoryState::Clean;
 
-        if is_in_merge_state {
+        if !can_cleanup_stale_conflicts {
             _log(
                 Arc::clone(&log_callback),
                 LogType::PushToRepo,
-                "Index has unresolved conflicts, cannot commit".to_string(),
+                format!(
+                    "Index has unresolved conflicts during repository state {:?}, cannot commit",
+                    repo_state
+                ),
             );
             return Err(git2::Error::from_str(
-                "Cannot commit: unresolved merge conflicts exist. Please resolve conflicts first.",
+                "Cannot commit: unresolved conflicts exist during an active Git operation. Please resolve conflicts first.",
             ));
         } else {
-            // Stale conflict entries left in the index (e.g. after cleanup_state() cleared
-            // MERGE_HEAD but did not clear the index conflict markers). Remove them so that
-            // the user's staged changes can be committed normally.
+            // Stale conflict entries left in the index when the repository is otherwise clean
+            // (e.g. after cleanup_state() cleared operation metadata but did not clear index
+            // conflict markers). Remove them so that the user's staged changes can be committed
+            // normally.
             _log(
                 Arc::clone(&log_callback),
                 LogType::PushToRepo,
