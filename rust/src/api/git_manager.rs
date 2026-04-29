@@ -2842,7 +2842,7 @@ pub async fn stage_file_paths(
             swl!(index.update_all(paths.iter(), None))?;
             for path in &paths {
                 let p = PathBuf::from(path);
-                if matches!(index.conflict_get(&p), Ok(Some(_))) {
+                if index.conflict_get(&p).is_ok() {
                     if let Err(e) = index.conflict_remove(&p) {
                         _log(
                             Arc::clone(&log_callback),
@@ -3147,17 +3147,32 @@ pub async fn commit_changes(
                 }
             }
             for raw_path in &conflict_paths {
-                match std::str::from_utf8(raw_path) {
-                    Ok(path_str) => {
-                        swl!(index.conflict_remove(Path::new(path_str)))?;
-                    }
+                // On Unix, file paths can be arbitrary byte sequences that are not valid UTF-8.
+                // Use OsStr::from_bytes so we can still call conflict_remove for those paths
+                // instead of silently leaving them in the index (which would cause write_tree to
+                // fail and keep the deadlock alive).
+                #[cfg(unix)]
+                let path: PathBuf = {
+                    use std::os::unix::ffi::OsStrExt;
+                    PathBuf::from(std::ffi::OsStr::from_bytes(raw_path))
+                };
+                #[cfg(not(unix))]
+                let path: PathBuf = match std::str::from_utf8(raw_path) {
+                    Ok(s) => PathBuf::from(s),
                     Err(_) => {
-                        _log(
-                            Arc::clone(&log_callback),
-                            LogType::PushToRepo,
-                            format!("Skipping conflict entry with non-UTF-8 path during stale conflict cleanup"),
-                        );
+                        // Non-UTF-8 paths cannot be represented on this platform; return a clear
+                        // error rather than silently leaving the index in a conflicted state.
+                        return Err(git2::Error::from_str(
+                            "Cannot remove stale conflict entry: path is not valid UTF-8",
+                        ));
                     }
+                };
+                if let Err(e) = index.conflict_remove(&path) {
+                    _log(
+                        Arc::clone(&log_callback),
+                        LogType::PushToRepo,
+                        format!("Failed to remove stale conflict entry {:?}: {}", path, e),
+                    );
                 }
             }
             swl!(index.write())?;
