@@ -2835,7 +2835,23 @@ pub async fn stage_file_paths(
     match index.add_all(paths.iter(), git2::IndexAddOption::DEFAULT, None) {
         Ok(_) => {}
         Err(_) => {
+            // add_all can fail for paths that don't exist in the working tree (e.g. deleted
+            // files in a conflict). Fall back to update_all and then manually clear any
+            // remaining conflict entries for the requested paths so they don't block later
+            // commit operations.
             swl!(index.update_all(paths.iter(), None))?;
+            for path in &paths {
+                let p = PathBuf::from(path);
+                if index.conflict_get(&p).is_ok() {
+                    if let Err(e) = index.conflict_remove(&p) {
+                        _log(
+                            Arc::clone(&log_callback),
+                            LogType::PushToRepo,
+                            format!("Failed to remove conflict entry for {}: {}", path, e),
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -3083,14 +3099,66 @@ pub async fn commit_changes(
 
     let mut index = swl!(repo.index())?;
     if index.has_conflicts() {
-        _log(
-            Arc::clone(&log_callback),
-            LogType::PushToRepo,
-            "Index has unresolved conflicts, cannot commit".to_string(),
-        );
-        return Err(git2::Error::from_str(
-            "Cannot commit: unresolved merge conflicts exist. Please resolve conflicts first.",
-        ));
+        let is_in_merge_state = repo.state() == RepositoryState::Merge
+            || repo.state() == RepositoryState::Rebase
+            || repo.state() == RepositoryState::RebaseMerge;
+
+        if is_in_merge_state {
+            _log(
+                Arc::clone(&log_callback),
+                LogType::PushToRepo,
+                "Index has unresolved conflicts, cannot commit".to_string(),
+            );
+            return Err(git2::Error::from_str(
+                "Cannot commit: unresolved merge conflicts exist. Please resolve conflicts first.",
+            ));
+        } else {
+            // Stale conflict entries left in the index (e.g. after cleanup_state() cleared
+            // MERGE_HEAD but did not clear the index conflict markers). Remove them so that
+            // the user's staged changes can be committed normally.
+            _log(
+                Arc::clone(&log_callback),
+                LogType::PushToRepo,
+                "Removing stale conflict entries from index to unblock commit".to_string(),
+            );
+            let mut conflict_paths: Vec<Vec<u8>> = Vec::new();
+            for conflict_result in swl!(index.conflicts())? {
+                match conflict_result {
+                    Ok(conflict) => {
+                        if let Some(path) = conflict
+                            .our
+                            .map(|e| e.path)
+                            .or_else(|| conflict.their.map(|e| e.path))
+                            .or_else(|| conflict.ancestor.map(|e| e.path))
+                        {
+                            conflict_paths.push(path);
+                        }
+                    }
+                    Err(e) => {
+                        _log(
+                            Arc::clone(&log_callback),
+                            LogType::PushToRepo,
+                            format!("Failed to read conflict entry while cleaning stale conflicts: {}", e),
+                        );
+                    }
+                }
+            }
+            for raw_path in &conflict_paths {
+                match std::str::from_utf8(raw_path) {
+                    Ok(path_str) => {
+                        swl!(index.conflict_remove(Path::new(path_str)))?;
+                    }
+                    Err(_) => {
+                        _log(
+                            Arc::clone(&log_callback),
+                            LogType::PushToRepo,
+                            format!("Skipping conflict entry with non-UTF-8 path during stale conflict cleanup"),
+                        );
+                    }
+                }
+            }
+            swl!(index.write())?;
+        }
     }
     let updated_tree_oid = swl!(index.write_tree())?;
 
