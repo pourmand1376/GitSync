@@ -3162,9 +3162,10 @@ pub async fn commit_changes(
                     Err(_) => {
                         // Non-UTF-8 paths cannot be represented on this platform; return a clear
                         // error rather than silently leaving the index in a conflicted state.
-                        return Err(git2::Error::from_str(
-                            "Cannot remove stale conflict entry: path is not valid UTF-8",
-                        ));
+                        return Err(git2::Error::from_str(&format!(
+                            "Cannot remove stale conflict entry: path is not valid UTF-8 (bytes: {:?})",
+                            raw_path
+                        )));
                     }
                 };
                 if let Err(e) = index.conflict_remove(&path) {
