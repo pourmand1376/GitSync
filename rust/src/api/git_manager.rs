@@ -2842,7 +2842,7 @@ pub async fn stage_file_paths(
             swl!(index.update_all(paths.iter(), None))?;
             for path in &paths {
                 let p = PathBuf::from(path);
-                if index.conflict_get(&p).is_ok() {
+                if matches!(index.conflict_get(&p), Ok(Some(_))) {
                     if let Err(e) = index.conflict_remove(&p) {
                         _log(
                             Arc::clone(&log_callback),
