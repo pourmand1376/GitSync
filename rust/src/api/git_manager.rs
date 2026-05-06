@@ -4681,36 +4681,6 @@ pub async fn prune_corrupted_loose_objects(path_string: String) -> Result<(), gi
                 Err(_) => continue,
             };
 
-            // Root cause of the infinite-retry loop seen in ViscousPot/GitSync
-            // issues #536, #557, #562, #569, #721, #808, #824, #842, #856,
-            // #890, #911, #925, #930, #967, #978, #984:
-            //
-            // libgit2 raises TWO distinct error classes when it cannot read a
-            // loose object:
-            //
-            //   • GIT_ERROR_OBJECT — "failed to parse loose object: invalid header"
-            //     The zlib stream inflates successfully, but the decompressed
-            //     bytes are not a valid git object header (wrong type string,
-            //     truncated size field, etc.).
-            //
-            //   • GIT_ERROR_ZLIB — "zlib inflate error: ..."
-            //     The zlib bitstream itself is unreadable (e.g. the file was
-            //     truncated mid-write when Android killed the process due to
-            //     memory pressure, battery-optimisation, or a storage fault).
-            //
-            // The previous filter `msg.contains("failed to parse loose object")`
-            // only caught GIT_ERROR_OBJECT.  Files in the GIT_ERROR_ZLIB class
-            // were silently skipped: the prune returned Ok(()), yet
-            // `_tryAutoFixCorruption` unconditionally returned `true` claiming
-            // the corruption was fixed, the operation was retried against the
-            // still-present corrupt file, and the cycle repeated on every sync.
-            //
-            // Since we have already verified that every file we inspect matches
-            // the canonical loose-object path layout (2-char hex directory +
-            // 38-char hex filename = valid 40-hex SHA-1), any `odb.read_header`
-            // failure — regardless of error class — means the object cannot be
-            // read and must be removed so the next sync can re-fetch it from
-            // the remote.
             if odb.read_header(oid).is_err() {
                 let _ = fs::remove_file(file_entry.path());
                 pruned += 1;
