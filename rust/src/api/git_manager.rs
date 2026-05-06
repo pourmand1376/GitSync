@@ -4681,12 +4681,12 @@ pub async fn prune_corrupted_loose_objects(path_string: String) -> Result<(), gi
                 Err(_) => continue,
             };
 
-            if let Err(e) = odb.read_header(oid) {
-                let msg = e.message().to_lowercase();
-                if msg.contains("failed to parse loose object") {
-                    let _ = fs::remove_file(file_entry.path());
-                    pruned += 1;
-                }
+            if odb.read_header(oid).is_err() {
+                // Any error reading a correctly-formatted loose object path means the
+                // object is unreadable (invalid header, zlib decompression failure, etc.)
+                // and should be removed so the next sync can re-fetch it from remote.
+                let _ = fs::remove_file(file_entry.path());
+                pruned += 1;
             }
         }
     }
